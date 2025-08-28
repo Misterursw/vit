@@ -10,8 +10,8 @@ model:
   # --- Hierarchical Reasoning & ACT ---
   H_cycles: 2
   L_cycles: 2
-  H_layers: 6       # 正式训练参数
-  L_layers: 6       # 正式训练参数
+  H_layers: 4       # 正式训练参数
+  L_layers: 4      # 正式训练参数
   halt_max_steps: 16  # 增加“思考”步数
   halt_exploration_prob: 0.1
 
@@ -20,7 +20,7 @@ model:
   expansion: 4.0      # 正式训练参数
   num_heads: 8        # 正式训练参数
   pos_encodings: "learned"
-  rms_norm_eps: 1.0e-5
+  rms_norm_eps: 2.0e-5
 
   # --- 计算精度 ---
   # 在支持 bfloat16 的 GPU 上可以设为 "bfloat16" 以加速
@@ -30,13 +30,13 @@ model:
 training:
   # --- 数据与批次 ---
   data_path: "/root/autodl-tmp/data" # CIFAR-100 数据下载路径
-  batch_size: 2048    # 根据您的 GPU 显存调整
-  num_workers: 16      # 根据您的 CPU 核心数调整
+  batch_size: 4096   # 根据您的 GPU 显存调整
+  num_workers: 0      # 根据您的 CPU 核心数调整
   augmentation_type: "autoaugment"
   # --- 优化器与学习率 ---
   epochs: 2000
   optimizer: "AdamW"
-  learning_rate: 1.0e-4
+  learning_rate: 2.0e-5
   weight_decay: 0.05
   beta1: 0.9
   beta2: 0.95
@@ -44,14 +44,14 @@ training:
   lr_scheduler: "cosine"
   warmup_epochs: 10
   # --- 验证与早停 ---
-  validation_interval: 5 # 每 5 个 epoch 验证一次
-  early_stopping_patience: 10 # 如果连续 3 次验证性能没有提升，则停止
+  validation_interval: 3 # 每 5 个 epoch 验证一次
+  early_stopping_patience: 20 # 如果连续 3 次验证性能没有提升，则停止
   # --- 新增：基于性能的ACT Loss调度 ---
   act_loss:
     # 当验证准确率达到此阈值时，开始引入ACT loss
-    trigger_accuracy_threshold: 40.0 # 单位是百分比
+    trigger_accuracy_threshold: 2.0 # 单位是百分比
     # 达到阈值后，用 N 个 epoch 将权重从 0 线性增长到 1.0
-    warmup_epochs: 200
+    warmup_epochs: 1
 # ============== 运行设置 ==============
 run:
   device: "cuda"  # 使用 'cuda' 或 'cpu'
@@ -60,5 +60,5 @@ run:
 wandb:
   project: "hr-vit-cifar100-act" # 您的 W&B 项目名称
   entity: null # 您的 W&B 实体/用户名 (如果是个人项目，可以留空)
-  name: "run_2" # 可以为每次运行指定一个名
+  name: "run_4" # 可以为每次运行指定一个名
   dir: "/root/autodl-tmp/wandb" # 您可以修改为您想要的任何路径

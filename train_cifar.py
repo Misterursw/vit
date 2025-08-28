@@ -201,7 +201,7 @@ def validate_one_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Modul
                 carry = inner_model.initial_carry(batch)
                 while True:
                     carry, outputs = inner_model(carry=carry, batch=batch)
-                    if 'halted' in carry and carry.halted.all(): break
+                    if carry.halted.all(): break
                     if isinstance(carry, tuple) and 'halted' in carry[1] and carry[1]['halted'].all(): break # for older carry format
                 logits = outputs['logits']
                 loss = criterion(logits, labels)
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, default="config_cifar100.yaml", help="Path to the config file.")
     parser.add_argument('--resume', action='store_true', help="Resume training from the best_model checkpoint.")
     parser.add_argument('--no-wandb', action='store_true', help="Disable Weights & Biases logging.")
-    parser.add_argument('--pretrained-weights', type=str, default="/root/autodl-tmp/checkpoints/checkpoint", help="Path to a pretrained model checkpoint for transfer learning.")
+    parser.add_argument('--pretrained-weights', type=str, default="/root/autodl-tmp/checkpoints/best_model.pth", help="Path to a pretrained model checkpoint for transfer learning.")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
