@@ -218,40 +218,48 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, default="config_cifar100.yaml", help="Path to the config file.")
     parser.add_argument('--resume', action='store_true', help="Resume training from the best_model checkpoint.")
     parser.add_argument('--no-wandb', action='store_true', help="Disable Weights & Biases logging.")
-    parser.add_argument('--pretrained-weights', type=str, default="/root/autodl-tmp/checkpoints/best_model.pth", help="Path to a pretrained model checkpoint for transfer learning.")
+    parser.add_argument('--pretrained-weights', type=str, default="/root/autodl-tmp/checkpoints/checkpoint", help="Path to a pretrained model checkpoint for transfer learning.")
     args = parser.parse_args()
+
+    print("--- [诊断] 1. 程序开始，正在解析参数...")
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
+    print("--- [诊断] 2. 配置文件加载完毕。")
+
     use_wandb = not args.no_wandb
     if use_wandb:
-        # 确保日志目录存在
+        print("--- [诊断] 3. 正在初始化 W&B...")
         wandb_config = config["wandb"]
         if wandb_config.get("dir"):
             os.makedirs(wandb_config["dir"], exist_ok=True)
-            
+
         wandb.init(
             project=wandb_config["project"],
             entity=wandb_config.get("entity"),
             name=wandb_config.get("name"),
             config=config,
-            # --- 使用配置中指定的目录 ---
             dir=wandb_config.get("dir") 
         )
+        print("--- [诊断] 4. W&B 初始化成功。")
 
     device = torch.device(config["run"]["device"] if torch.cuda.is_available() else "cpu")
     os.makedirs(config["run"]["checkpoint_path"], exist_ok=True)
     checkpoint_file = os.path.join(config["run"]["checkpoint_path"], "best_model.pth")
-    
+
+    print(f"--- [诊断] 5. 准备加载数据集，num_workers={config['training']['num_workers']}...")
     train_loader, val_loader = get_dataloaders(**config["training"])
+    print("--- [诊断] 6. 数据集加载成功！")
 
     model_config = config["model"]
     model_config["batch_size"] = config["training"]["batch_size"]
+    print("--- [诊断] 7. 正在初始化模型...")
     hr_vit_model = HRViT_V1(model_config)
     model = ACTLossHead(hr_vit_model, loss_type="softmax_cross_entropy")
     model.to(device)
-    
+    print("--- [诊断] 8. 模型初始化完毕。")
+
     print(f"模型总参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     if args.pretrained_weights and not args.resume:
@@ -266,14 +274,14 @@ if __name__ == "__main__":
         betas=betas
     )
     print(f"初始化 AdamW 优化器，betas={betas}")
-    
+
     criterion = nn.CrossEntropyLoss()
     scaler = GradScaler()
-    
+
     num_training_steps = config["training"]["epochs"] * len(train_loader)
     num_warmup_steps = config["training"]["warmup_epochs"] * len(train_loader)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
-    
+
     start_epoch = 1
     act_warmup_activated = False
     act_warmup_start_epoch = -1
@@ -293,6 +301,8 @@ if __name__ == "__main__":
         act_warmup_activated = checkpoint.get('act_warmup_activated', False)
         act_warmup_start_epoch = checkpoint.get('act_warmup_start_epoch', -1)
         print(f"从 epoch {start_epoch} 继续。")
+
+    print("--- [诊断] 9. 一切准备就绪，即将开始第一个epoch的训练！")
     
     for epoch in range(start_epoch, config["training"]["epochs"] + 1):
         act_config = config["training"]["act_loss"]

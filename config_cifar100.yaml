@@ -31,7 +31,7 @@ training:
   # --- 数据与批次 ---
   data_path: "/root/autodl-tmp/data" # CIFAR-100 数据下载路径
   batch_size: 4096   # 根据您的 GPU 显存调整
-  num_workers: 0      # 根据您的 CPU 核心数调整
+  num_workers: 16      # 根据您的 CPU 核心数调整
   augmentation_type: "autoaugment"
   # --- 优化器与学习率 ---
   epochs: 2000
