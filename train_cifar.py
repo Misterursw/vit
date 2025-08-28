@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import yaml
 import os
+import wandb
+from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from typing import Dict, Tuple
 import argparse
@@ -15,6 +17,7 @@ import argparse
 from models.hrm.hrm_vit_v1 import HRViT_V1, HRViT_V1Carry
 # 导入 GradScaler 用于混合精度训练
 from torch.cuda.amp import GradScaler, autocast
+import shutil
 
 from models.hrm.hrm_vit_v1 import HRViT_V1, HRViT_V1Carry
 # train_cifar.py (最终修正版，兼容您的 PyTorch 环境)
@@ -34,23 +37,20 @@ import yaml
 import os
 from tqdm import tqdm
 from typing import Dict, Tuple
-
+from collections import OrderedDict
 # 关键修正：导入旧版但兼容性好的 amp API
 from torch.cuda.amp import GradScaler, autocast
 
 from models.hrm.hrm_vit_v1 import HRViT_V1, HRViT_V1Carry
-
-# --- EarlyStopping 类 (无需改动) ---
-# --- 早停与检查点模块 ---
-# --- 早停与智能检查点模块 (V4) ---
+# --- 新增：加载部分预训练权重的函数 ---
+# --- 修正后的权重加载函数 ---
+# ... (CheckpointManager, get_dataloaders, get_linear_schedule_with_warmup 函数保持不变)
 class CheckpointManager:
     def __init__(self, patience: int = 20, verbose: bool = True, path: str = 'checkpoint.pth'):
         self.patience = patience
         self.verbose = verbose
-        # 定义两个检查点路径
         self.best_path = path
         self.previous_best_path = os.path.join(os.path.dirname(path), "previous_" + os.path.basename(path))
-        
         self.counter = 0
         self.best_score = None
         self.early_stop = False
@@ -72,49 +72,90 @@ class CheckpointManager:
 
     def save_checkpoint(self, val_loss, state: Dict):
         if self.verbose: print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}). Saving model...')
-        
-        # --- 核心逻辑：轮换保存 ---
-        # 1. 如果已存在 best_model，先将其重命名为 previous_best_model
         if os.path.exists(self.best_path):
             try:
-                # 使用 shutil.move 来原子性地重命名
                 shutil.move(self.best_path, self.previous_best_path)
                 if self.verbose: print(f"Backed up previous best model to {self.previous_best_path}")
             except Exception as e:
                 if self.verbose: print(f"Warning: Could not back up previous best model. Error: {e}")
-
-        # 2. 保存新的 best_model
         torch.save(state, self.best_path)
         self.val_loss_min = val_loss
 
-# --- 数据加载模块 (保持不变) ---
 def get_dataloaders(data_path: str, batch_size: int, num_workers: int, augmentation_type: str, **kwargs) -> Tuple[DataLoader, DataLoader]:
     print(f"使用数据增强策略: {augmentation_type}")
     mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
-    
     train_transforms_list = [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip()]
     if augmentation_type == "autoaugment":
         train_transforms_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
-    
     train_transforms_list.extend([transforms.ToTensor(), transforms.Normalize(mean, std), transforms.RandomErasing(p=0.1)])
-    
     transform_train = transforms.Compose(train_transforms_list)
     transform_val = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
-
     train_dataset = datasets.CIFAR100(root=data_path, train=True, download=True, transform=transform_train)
     val_dataset = datasets.CIFAR100(root=data_path, train=False, download=True, transform=transform_val)
-
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
 
-# --- 训练与验证 (逻辑微调) ---
-def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: optim.Optimizer, device: torch.device, scaler: GradScaler, act_loss_weight: float) -> float:
+def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+# --- 带有调试打印的权重加载函数 ---
+# --- 最终修正的权重加载函数 ---
+def load_partial_pretrained_weights(model: nn.Module, pretrained_path: str, device: torch.device):
+    if not os.path.exists(pretrained_path):
+        print(f"警告: 预训练权重文件不存在于 {pretrained_path}。将从零开始训练。")
+        return
+
+    print(f"正在从 {pretrained_path} 加载预训练权重...")
+    checkpoint_data = torch.load(pretrained_path, map_location=device)
+    
+    if 'model_state_dict' in checkpoint_data:
+        pretrained_state_dict = checkpoint_data['model_state_dict']
+    elif 'state_dict' in checkpoint_data:
+        pretrained_state_dict = checkpoint_data['state_dict']
+    else:
+        pretrained_state_dict = checkpoint_data
+
+    model_state_dict = model.state_dict()
+    new_state_dict = OrderedDict()
+    loaded_keys = []
+    skipped_keys = []
+
+    for k, v in pretrained_state_dict.items():
+        # --- 核心修正：移除 "_orig_mod." 前缀 ---
+        if k.startswith("_orig_mod."):
+            # “扒掉”外包装，得到真正的层名
+            new_key = k[len("_orig_mod."):]
+        else:
+            new_key = k
+        
+        # 用处理后的层名进行匹配
+        if new_key in model_state_dict and model_state_dict[new_key].shape == v.shape:
+            new_state_dict[new_key] = v
+            loaded_keys.append(new_key)
+        else:
+            skipped_keys.append(k) # 记录原始的、未加载的key
+    
+    # 使用 strict=False 安全地加载匹配上的权重
+    model.load_state_dict(new_state_dict, strict=False)
+
+    print(f"成功加载了 {len(loaded_keys)} 个层的权重。")
+    if skipped_keys:
+        print(f"跳过了 {len(skipped_keys)} 个不匹配的层 (这是正常的)。")
+
+# --- train_one_epoch 和 validate_one_epoch 函数保持不变 ---
+from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
+
+def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: optim.Optimizer, device: torch.device, scaler: GradScaler, act_loss_weight: float, scheduler: torch.optim.lr_scheduler._LRScheduler) -> float:
     model.train()
     total_loss = 0.0
     progress_bar = tqdm(loader, desc=f"Training (ACT W: {act_loss_weight:.3f})", leave=False)
-    
-    # 获取内部的 HR-ViT 模型，用于创建 carry
     inner_model = model.module.model if isinstance(model, nn.DataParallel) else model.model
 
     for images, labels in progress_bar:
@@ -123,13 +164,11 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: optim.Optim
         optimizer.zero_grad(set_to_none=True)
         
         with autocast():
-            # --- 关键修正：恢复 while 循环 ---
             carry = inner_model.initial_carry(batch)
             while True:
-                # model 是 ACTLossHead 包装器
                 new_carry, loss, _, _, halted_all = model(
                     batch=batch,
-                    carry=carry, # 传递 carry
+                    carry=carry,
                     return_keys=[],
                     act_loss_weight=act_loss_weight
                 )
@@ -140,8 +179,10 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: optim.Optim
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        scheduler.step()
+        
         total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item())
+        progress_bar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
         
     return total_loss / len(loader)
 
@@ -155,15 +196,13 @@ def validate_one_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Modul
             images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             batch: Dict[str, torch.Tensor] = {"images": images, "labels": labels}
             with autocast():
-                # 为了验证，我们需要访问内部模型来获得logits
                 inner_model_with_loss = model.module if isinstance(model, nn.DataParallel) else model
                 inner_model = inner_model_with_loss.model
-                
-                # 创建初始状态时需要确保设备正确
                 carry = inner_model.initial_carry(batch)
                 while True:
                     carry, outputs = inner_model(carry=carry, batch=batch)
-                    if carry.halted.all(): break
+                    if 'halted' in carry and carry.halted.all(): break
+                    if isinstance(carry, tuple) and 'halted' in carry[1] and carry[1]['halted'].all(): break # for older carry format
                 logits = outputs['logits']
                 loss = criterion(logits, labels)
             total_loss += loss.item()
@@ -173,15 +212,26 @@ def validate_one_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Modul
     accuracy = 100 * correct / total
     return total_loss / len(loader), accuracy
 
-# --- 主函数 (最终版) ---
+# --- 主函数 ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Advanced Training Script for HR-ViT on CIFAR-100 (V4)")
+    parser = argparse.ArgumentParser(description="Advanced Training Script for HR-ViT on CIFAR-100")
     parser.add_argument('--config', type=str, default="config_cifar100.yaml", help="Path to the config file.")
-    parser.add_argument('--resume', action='store_true', help="Resume training from the best_model checkpoint in the config path.")
+    parser.add_argument('--resume', action='store_true', help="Resume training from the best_model checkpoint.")
+    parser.add_argument('--no-wandb', action='store_true', help="Disable Weights & Biases logging.")
+    parser.add_argument('--pretrained-weights', type=str, default="/root/autodl-tmp/checkpoints/checkpoint", help="Path to a pretrained model checkpoint for transfer learning.")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=config["wandb"]["project"],
+            entity=config["wandb"].get("entity"),
+            name=config["wandb"].get("name"),
+            config=config
+        )
 
     device = torch.device(config["run"]["device"] if torch.cuda.is_available() else "cpu")
     os.makedirs(config["run"]["checkpoint_path"], exist_ok=True)
@@ -197,14 +247,29 @@ if __name__ == "__main__":
     
     print(f"模型总参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
-    optimizer = optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"], weight_decay=config["training"]["weight_decay"])
+    if args.pretrained_weights and not args.resume:
+        load_partial_pretrained_weights(model, args.pretrained_weights, device)
+
+    optimizer_config = config["training"]
+    betas = (optimizer_config.get("beta1", 0.9), optimizer_config.get("beta2", 0.999))
+    optimizer = optim.AdamW(
+        model.parameters(), 
+        lr=optimizer_config["learning_rate"], 
+        weight_decay=optimizer_config["weight_decay"],
+        betas=betas
+    )
+    print(f"初始化 AdamW 优化器，betas={betas}")
+    
     criterion = nn.CrossEntropyLoss()
     scaler = GradScaler()
+    
+    num_training_steps = config["training"]["epochs"] * len(train_loader)
+    num_warmup_steps = config["training"]["warmup_epochs"] * len(train_loader)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
     
     start_epoch = 1
     act_warmup_activated = False
     act_warmup_start_epoch = -1
-
     manager = CheckpointManager(patience=config["training"]["early_stopping_patience"], verbose=True, path=checkpoint_file)
 
     if args.resume and os.path.isfile(checkpoint_file):
@@ -213,12 +278,14 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         manager.val_loss_min = checkpoint['best_val_loss']
         manager.best_score = -manager.val_loss_min
         act_warmup_activated = checkpoint.get('act_warmup_activated', False)
         act_warmup_start_epoch = checkpoint.get('act_warmup_start_epoch', -1)
-        print(f"从 epoch {start_epoch} 继续。ACT 预热状态: {'已激活' if act_warmup_activated else '未激活'}")
+        print(f"从 epoch {start_epoch} 继续。")
     
     for epoch in range(start_epoch, config["training"]["epochs"] + 1):
         act_config = config["training"]["act_loss"]
@@ -227,11 +294,22 @@ if __name__ == "__main__":
             progress = (epoch - act_warmup_start_epoch) / act_config["warmup_epochs"]
             act_loss_weight = min(1.0, progress)
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, scaler, act_loss_weight)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, scaler, act_loss_weight, scheduler)
         
+        if use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "learning_rate": scheduler.get_last_lr()[0],
+                "act_loss_weight": act_loss_weight
+            })
+
         if epoch % config["training"]["validation_interval"] == 0:
             val_loss, val_acc = validate_one_epoch(model, val_loader, criterion, device)
             print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            
+            if use_wandb:
+                wandb.log({"val_loss": val_loss, "val_accuracy": val_acc})
             
             if not act_warmup_activated and val_acc >= act_config["trigger_accuracy_threshold"]:
                 act_warmup_activated = True
@@ -243,6 +321,7 @@ if __name__ == "__main__":
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scaler_state_dict': scaler.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': min(val_loss, manager.val_loss_min),
                 'act_warmup_activated': act_warmup_activated,
                 'act_warmup_start_epoch': act_warmup_start_epoch,
@@ -255,3 +334,5 @@ if __name__ == "__main__":
     print("\n训练结束。")
     print(f"性能最优的模型保存在: {checkpoint_file}")
     print(f"次优（前一最佳）模型保存在: {manager.previous_best_path}")
+    if use_wandb:
+        wandb.finish()

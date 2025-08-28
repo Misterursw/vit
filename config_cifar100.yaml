@@ -12,7 +12,7 @@ model:
   L_cycles: 2
   H_layers: 6       # 正式训练参数
   L_layers: 6       # 正式训练参数
-  halt_max_steps: 12  # 增加“思考”步数
+  halt_max_steps: 16  # 增加“思考”步数
   halt_exploration_prob: 0.1
 
   # --- Transformer 核心参数 ---
@@ -36,11 +36,13 @@ training:
   # --- 优化器与学习率 ---
   epochs: 2000
   optimizer: "AdamW"
-  learning_rate: 1.0e-3
+  learning_rate: 1.0e-4
   weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.95
   # 学习率调度器: 'cosine' 或 'none'
   lr_scheduler: "cosine"
-
+  warmup_epochs: 10
   # --- 验证与早停 ---
   validation_interval: 5 # 每 5 个 epoch 验证一次
   early_stopping_patience: 10 # 如果连续 3 次验证性能没有提升，则停止
@@ -54,3 +56,8 @@ training:
 run:
   device: "cuda"  # 使用 'cuda' 或 'cpu'
   checkpoint_path: "/root/autodl-tmp/checkpoints" # 保存模型的路径
+
+wandb:
+  project: "hr-vit-cifar100-act" # 您的 W&B 项目名称
+  entity: null # 您的 W&B 实体/用户名 (如果是个人项目，可以留空)
+  name: "run_2" # 可以为每次运行指定一个名

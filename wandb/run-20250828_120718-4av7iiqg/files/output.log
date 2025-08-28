@@ -1,0 +1,18 @@
+使用数据增强策略: autoaugment
+模型总参数量: 41,006,694
+正在从 /root/autodl-tmp/checkpoints/checkpoint 加载预训练权重...
+成功加载了 0 个层的权重。
+跳过了 39 个不匹配的层 (这是正常的，因为输入/输出层不同)。
+初始化 AdamW 优化器，betas=(0.9, 0.95)
+/root/autodl-tmp/HRM/train_cifar.py:287: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = GradScaler()
+Training (ACT W: 0.000):   0%|                                                                                                                                                           | 0/25 [00:00<?, ?it/s]/root/autodl-tmp/HRM/train_cifar.py:182: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast():
+Traceback (most recent call last):                                                                                                                                                                              
+  File "/root/autodl-tmp/HRM/train_cifar.py", line 321, in <module>
+    train_loss = train_one_epoch(model, train_loader, optimizer, device, scaler, act_loss_weight)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/HRM/train_cifar.py", line 185, in train_one_epoch
+    while True:
+          ^^^^
+KeyboardInterrupt

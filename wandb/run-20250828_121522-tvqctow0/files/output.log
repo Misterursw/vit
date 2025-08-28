@@ -1,0 +1,21 @@
+使用数据增强策略: autoaugment
+模型总参数量: 41,006,694
+正在从 /root/autodl-tmp/checkpoints/checkpoint 加载预训练权重...
+
+--- DEBUGGING: 检查层名称 ---
+预训练模型的前5个层名称 (Keys from checkpoint):
+  _orig_mod.model.inner.H_init
+  _orig_mod.model.inner.L_init
+  _orig_mod.model.inner.embed_tokens.embedding_weight
+  _orig_mod.model.inner.lm_head.weight
+  _orig_mod.model.inner.q_head.weight
+
+当前视觉模型的前5个层名称 (Keys from current model):
+  model.inner.cls_token
+  model.inner.pos_embed
+  model.inner.H_init
+  model.inner.L_init
+  model.inner.patch_embed.proj.weight
+--- DEBUGGING END ---
+
+调试模式：已打印层名称，暂不执行加载。请根据上面的输出调整加载逻辑。

@@ -1,0 +1,32 @@
+使用数据增强策略: autoaugment
+模型总参数量: 41,006,694
+正在从 /root/autodl-tmp/checkpoints/checkpoint 加载预训练权重...
+成功加载了 0 个层的权重。
+跳过了 39 个不匹配的层。
+初始化 AdamW 优化器，betas=(0.9, 0.95)
+/root/autodl-tmp/HRM/train_cifar.py:302: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = GradScaler()
+Training (ACT W: 0.000):   0%|                                                                                                                                                           | 0/25 [00:00<?, ?it/s]/root/autodl-tmp/HRM/train_cifar.py:197: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast():
+Traceback (most recent call last):                                                                                                                                                                              
+  File "/root/autodl-tmp/HRM/train_cifar.py", line 336, in <module>
+    train_loss = train_one_epoch(model, train_loader, optimizer, device, scaler, act_loss_weight)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/HRM/train_cifar.py", line 200, in train_one_epoch
+    while True:
+          ^^^^
+KeyboardInterrupt
+Exception ignored in atexit callback: <function _start_and_connect_service.<locals>.teardown_atexit at 0x7f2830306700>
+Traceback (most recent call last):
+  File "/root/miniconda3/lib/python3.12/site-packages/wandb/sdk/lib/service/service_connection.py", line 54, in teardown_atexit
+    conn.teardown(hooks.exit_code)
+  File "/root/miniconda3/lib/python3.12/site-packages/wandb/sdk/lib/service/service_connection.py", line 182, in teardown
+    self._router.join()
+  File "/root/miniconda3/lib/python3.12/site-packages/wandb/sdk/interface/router.py", line 75, in join
+    self._thread.join()
+  File "/root/miniconda3/lib/python3.12/threading.py", line 1147, in join
+    self._wait_for_tstate_lock()
+  File "/root/miniconda3/lib/python3.12/threading.py", line 1167, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt:
