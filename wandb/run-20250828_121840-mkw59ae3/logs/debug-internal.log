@@ -1,7 +1,0 @@
-{"time":"2025-08-28T12:18:40.7184416+08:00","level":"INFO","msg":"stream: starting","core version":"0.21.1"}
-{"time":"2025-08-28T12:18:41.380945936+08:00","level":"INFO","msg":"stream: created new stream","id":"mkw59ae3"}
-{"time":"2025-08-28T12:18:41.380997766+08:00","level":"INFO","msg":"stream: started","id":"mkw59ae3"}
-{"time":"2025-08-28T12:18:41.381035145+08:00","level":"INFO","msg":"sender: started","stream_id":"mkw59ae3"}
-{"time":"2025-08-28T12:18:41.381042825+08:00","level":"INFO","msg":"handler: started","stream_id":"mkw59ae3"}
-{"time":"2025-08-28T12:18:41.381033025+08:00","level":"INFO","msg":"writer: started","stream_id":"mkw59ae3"}
-{"time":"2025-08-28T12:19:01.233767908+08:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/golden_catfood-johns-hopkins-university/hr-vit-cifar100-act/mkw59ae3/file_stream\": EOF"}

@@ -226,11 +226,18 @@ if __name__ == "__main__":
 
     use_wandb = not args.no_wandb
     if use_wandb:
+        # 确保日志目录存在
+        wandb_config = config["wandb"]
+        if wandb_config.get("dir"):
+            os.makedirs(wandb_config["dir"], exist_ok=True)
+            
         wandb.init(
-            project=config["wandb"]["project"],
-            entity=config["wandb"].get("entity"),
-            name=config["wandb"].get("name"),
-            config=config
+            project=wandb_config["project"],
+            entity=wandb_config.get("entity"),
+            name=wandb_config.get("name"),
+            config=config,
+            # --- 使用配置中指定的目录 ---
+            dir=wandb_config.get("dir") 
         )
 
     device = torch.device(config["run"]["device"] if torch.cuda.is_available() else "cpu")

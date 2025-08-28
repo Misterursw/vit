@@ -61,3 +61,4 @@ wandb:
   project: "hr-vit-cifar100-act" # 您的 W&B 项目名称
   entity: null # 您的 W&B 实体/用户名 (如果是个人项目，可以留空)
   name: "run_2" # 可以为每次运行指定一个名
+  dir: "/root/autodl-tmp/wandb" # 您可以修改为您想要的任何路径
