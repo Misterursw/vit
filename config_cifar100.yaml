@@ -1,0 +1,56 @@
+# config_cifar100.yaml
+
+# ============== 模型架构参数 ==============
+model:
+  image_size: 32
+  patch_size: 4
+  in_chans: 3
+  num_classes: 100  # CIFAR-100 有100个类别
+
+  # --- Hierarchical Reasoning & ACT ---
+  H_cycles: 2
+  L_cycles: 2
+  H_layers: 6       # 正式训练参数
+  L_layers: 6       # 正式训练参数
+  halt_max_steps: 12  # 增加“思考”步数
+  halt_exploration_prob: 0.1
+
+  # --- Transformer 核心参数 ---
+  hidden_size: 512    # 正式训练参数
+  expansion: 4.0      # 正式训练参数
+  num_heads: 8        # 正式训练参数
+  pos_encodings: "learned"
+  rms_norm_eps: 1.0e-5
+
+  # --- 计算精度 ---
+  # 在支持 bfloat16 的 GPU 上可以设为 "bfloat16" 以加速
+  forward_dtype: "float32"
+
+# ============== 训练超参数 ==============
+training:
+  # --- 数据与批次 ---
+  data_path: "/root/autodl-tmp/data" # CIFAR-100 数据下载路径
+  batch_size: 2048    # 根据您的 GPU 显存调整
+  num_workers: 16      # 根据您的 CPU 核心数调整
+  augmentation_type: "autoaugment"
+  # --- 优化器与学习率 ---
+  epochs: 2000
+  optimizer: "AdamW"
+  learning_rate: 1.0e-3
+  weight_decay: 0.05
+  # 学习率调度器: 'cosine' 或 'none'
+  lr_scheduler: "cosine"
+
+  # --- 验证与早停 ---
+  validation_interval: 5 # 每 5 个 epoch 验证一次
+  early_stopping_patience: 10 # 如果连续 3 次验证性能没有提升，则停止
+  # --- 新增：基于性能的ACT Loss调度 ---
+  act_loss:
+    # 当验证准确率达到此阈值时，开始引入ACT loss
+    trigger_accuracy_threshold: 40.0 # 单位是百分比
+    # 达到阈值后，用 N 个 epoch 将权重从 0 线性增长到 1.0
+    warmup_epochs: 200
+# ============== 运行设置 ==============
+run:
+  device: "cuda"  # 使用 'cuda' 或 'cpu'
+  checkpoint_path: "/root/autodl-tmp/checkpoints" # 保存模型的路径

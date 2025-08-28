@@ -7,95 +7,84 @@ from torch import nn
 
 IGNORE_LABEL_ID = -100
 
-
-def s(x, epsilon=1e-30):
-    return torch.where(
-        x<0,
-        1/(1-x+ epsilon),
-        x + 1
-    )
-
-
-def log_stablemax(x, dim=-1):
-    s_x = s(x)
-    return torch.log(s_x/torch.sum(s_x, dim=dim, keepdim=True))
-
-
-def stablemax_cross_entropy(logits, labels, ignore_index: int = -100):
-    logprobs = log_stablemax(logits.to(torch.float64), dim=-1)
-
-    valid_mask = labels != ignore_index
-    transformed_labels = torch.where(valid_mask, labels, 0)
-    prediction_logprobs = torch.gather(logprobs, index=transformed_labels.to(torch.long).unsqueeze(-1), dim=-1).squeeze(-1)
-
-    return -torch.where(valid_mask, prediction_logprobs, 0)
-
-
+# softmax_cross_entropy 函数保持不变，因为它是标准的
 def softmax_cross_entropy(logits, labels, ignore_index: int = -100):
-    # Cast logits to f32
-    # Flatten logits
     return F.cross_entropy(logits.to(torch.float32).view(-1, logits.shape[-1]), labels.to(torch.long).view(-1), ignore_index=ignore_index, reduction="none").view(labels.shape)
-
 
 class ACTLossHead(nn.Module):
     def __init__(self, model: nn.Module, loss_type: str):
         super().__init__()
         self.model = model
-        self.loss_fn = globals()[loss_type]
-        
-    def initial_carry(self, *args, **kwargs):
-        return self.model.initial_carry(*args, **kwargs)  # type: ignore
+        # 对于分类任务，我们直接使用 PyTorch 的标准交叉熵损失
+        self.criterion = nn.CrossEntropyLoss(reduction='sum')
 
     def forward(
         self,
+        carry: Any,
+        batch: Dict[str, torch.Tensor],
         return_keys: Sequence[str],
-        # Model args
-        **model_kwargs,
+        act_loss_weight: float = 1.0,
     ) -> Tuple[Any, torch.Tensor, Dict[str, torch.Tensor], Optional[Dict[str, torch.Tensor]], torch.Tensor]:
-        # Model logits
-        # B x SeqLen x D
-        new_carry, outputs = self.model(**model_kwargs)
+        
+        # 这一步调用的是 HRViT_V1.forward()
+        new_carry, outputs = self.model(carry=carry, batch=batch)
         labels = new_carry.current_data["labels"]
 
-        # Correctness
+        # --- 关键修正：为图像分类重新定义“正确性” ---
         with torch.no_grad():
-            mask = labels != IGNORE_LABEL_ID
-            loss_counts = mask.sum(-1)
-            loss_divisor = loss_counts.clamp_min(1).unsqueeze(-1)  # Avoid NaNs in division
+            # 对于图像分类，"正确性"就是一个形状为 (batch_size,) 的布尔张量
+            # is_correct 的每个元素代表对应图片的预测是否正确
+            is_correct = (torch.argmax(outputs["logits"], dim=-1) == labels)
 
-            is_correct = mask & (torch.argmax(outputs["logits"], dim=-1) == labels)
-            seq_is_correct = is_correct.sum(-1) == loss_counts
-            
-            # Metrics (halted)
-            valid_metrics = new_carry.halted & (loss_counts > 0)
+            # Metrics (只统计已停机样本)
+            valid_metrics = new_carry.halted
             metrics = {
                 "count": valid_metrics.sum(),
-                
-                "accuracy":       torch.where(valid_metrics, (is_correct.to(torch.float32) / loss_divisor).sum(-1), 0).sum(),
-                "exact_accuracy": (valid_metrics & seq_is_correct).sum(),
-
-                "q_halt_accuracy": (valid_metrics & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)).sum(),
-                "steps":          torch.where(valid_metrics, new_carry.steps, 0).sum(),
+                # 在已停机样本中，正确预测的数量
+                "accuracy": (valid_metrics & is_correct).sum(),
+                # 对于分类任务，"exact_accuracy" 和 "accuracy" 是一样的
+                "exact_accuracy": (valid_metrics & is_correct).sum(),
+                # q_halt_logits > 0 意为模型倾向于停机。此指标衡量停机决策的正确性
+                "q_halt_accuracy": (valid_metrics & ((outputs["q_halt_logits"] >= 0) == is_correct)).sum(),
+                # 计算已停机样本的平均思考步数
+                "steps": torch.where(valid_metrics, new_carry.steps, 0).sum(),
             }
 
-        # Losses
-        # FIXME: Assuming the batch is always full
-        lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
-        q_halt_loss = F.binary_cross_entropy_with_logits(outputs["q_halt_logits"], seq_is_correct.to(outputs["q_halt_logits"].dtype), reduction="sum")
+        # --- 关键修正：为图像分类重新定义损失计算 ---
+        
+        # 1. 分类损失 (Classification Loss)
+        # 使用标准的交叉熵，并对整个批次求和
+        lm_loss = self.criterion(outputs["logits"], labels)
+
+        # 2. Q-Halt 损失
+        # 现在的目标 is_correct (B,) 和输入 q_halt_logits (B,) 形状完全匹配！
+        q_halt_loss = F.binary_cross_entropy_with_logits(
+            outputs["q_halt_logits"],
+            is_correct.to(outputs["q_halt_logits"].dtype),
+            reduction="sum"
+        )
 
         metrics.update({
             "lm_loss": lm_loss.detach(),
             "q_halt_loss": q_halt_loss.detach(),
         })
 
-        # Q continue (bootstrapping target loss)
+        # 3. Q-Continue 损失 (逻辑不变)
         q_continue_loss = 0
         if "target_q_continue" in outputs:
-            q_continue_loss = F.binary_cross_entropy_with_logits(outputs["q_continue_logits"], outputs["target_q_continue"], reduction="sum")
-
+            q_continue_loss = F.binary_cross_entropy_with_logits(
+                outputs["q_continue_logits"],
+                outputs["target_q_continue"],
+                reduction="sum"
+            )
             metrics["q_continue_loss"] = q_continue_loss.detach()
 
-        # Filter outputs for return
+        # 将动态权重应用于 ACT 相关的损失
+        total_loss = lm_loss + act_loss_weight * 0.5 * (q_halt_loss + q_continue_loss)
+
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
 
-        return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
+        halted_all = new_carry.halted.all()
+
+        # 返回训练循环需要的所有值
+        return new_carry, total_loss, metrics, detached_outputs, halted_all
