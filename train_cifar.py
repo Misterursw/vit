@@ -1,5 +1,5 @@
 # train_cifar.py
-
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -152,128 +152,172 @@ def load_partial_pretrained_weights(model: nn.Module, pretrained_path: str, devi
 from torch.cuda.amp import GradScaler, autocast
 from torch.cuda.amp import GradScaler, autocast
 
+# train_cifar.py (请替换 train_one_epoch 函数)
+
+# train_cifar.py (请使用这个版本的 train_one_epoch 函数)
+
 def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: optim.Optimizer, device: torch.device, scaler: GradScaler, act_loss_weight: float, scheduler: torch.optim.lr_scheduler._LRScheduler) -> float:
     model.train()
     total_loss = 0.0
-    progress_bar = tqdm(loader, desc=f"Training (ACT W: {act_loss_weight:.3f})", leave=False)
+    total_ponder_steps = 0.0
     inner_model = model.module.model if isinstance(model, nn.DataParallel) else model.model
+    
+    batch_bar = tqdm(loader, desc=f"Epoch Training (ACT W: {act_loss_weight:.3f})")
 
-    for images, labels in progress_bar:
+    for batch_idx, (images, labels) in enumerate(batch_bar):
         images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch: Dict[str, torch.Tensor] = {"images": images, "labels": labels}
         optimizer.zero_grad(set_to_none=True)
         
+        loss = None
+        
         with autocast():
             carry = inner_model.initial_carry(batch)
+            halt_max_steps = inner_model.config.halt_max_steps
+            ponder_step = 0
+
             while True:
-                new_carry, loss, _, _, halted_all = model(
+                ponder_step += 1
+                new_carry, current_loss, _, _, halted_all = model(
                     batch=batch,
                     carry=carry,
                     return_keys=[],
                     act_loss_weight=act_loss_weight
                 )
+                
+                loss = current_loss
                 carry = new_carry
-                if halted_all:
+                
+                if halted_all or ponder_step >= halt_max_steps:
                     break
         
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        scheduler.step()
-        
-        total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
+        total_ponder_steps += ponder_step
+
+        if loss is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            total_loss += loss.item()
+            
+            avg_ponder = total_ponder_steps / (batch_idx + 1)
+            batch_bar.set_postfix(
+                loss=f"{loss.item():.3f}", 
+                lr=f"{scheduler.get_last_lr()[0]:.1e}",
+                avg_steps=f"{avg_ponder:.2f}/{halt_max_steps}"
+            )
         
     return total_loss / len(loader)
+# train_cifar.py (请替换整个 validate_one_epoch 函数)
 
 def validate_one_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> Tuple[float, float]:
     model.eval()
     total_loss = 0.0
     correct = 0
     total = 0
+    total_ponder_steps = 0.0 # 新增：用于统计验证时的平均思考步数
+    inner_model_with_loss = model.module if isinstance(model, nn.DataParallel) else model
+    inner_model = inner_model_with_loss.model
+    
     with torch.no_grad():
         for images, labels in tqdm(loader, desc="Validating", leave=False):
             images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             batch: Dict[str, torch.Tensor] = {"images": images, "labels": labels}
+            
             with autocast():
-                inner_model_with_loss = model.module if isinstance(model, nn.DataParallel) else model
-                inner_model = inner_model_with_loss.model
                 carry = inner_model.initial_carry(batch)
+                halt_max_steps = inner_model.config.halt_max_steps
+                outputs = None
+                ponder_step = 0
+
+                # --- [核心修正] ---
+                # 验证时也使用循环，并根据 q_head 决策来提前停止
                 while True:
-                    carry, outputs = inner_model(carry=carry, batch=batch)
-                    if carry.halted.all(): break
-                    if isinstance(carry, tuple) and 'halted' in carry[1] and carry[1]['halted'].all(): break # for older carry format
-                logits = outputs['logits']
-                loss = criterion(logits, labels)
+                    ponder_step += 1
+                    # 在评估模式下，我们直接调用模型的核心逻辑 HRViT_V1
+                    new_carry, current_outputs = inner_model(carry=carry, batch=batch)
+                    
+                    # 将当前步骤的输出保存在 outputs 中
+                    # 注意：我们只保存尚未停机样本的 logits
+                    # 第一次循环时，outputs 为 None
+                    if outputs is None:
+                        outputs = current_outputs
+                    else:
+                        # 用新一步的输出，更新那些仍在“思考”的样本的输出
+                        is_still_running = ~carry.halted 
+                        outputs["logits"] = torch.where(is_still_running.view(-1, 1), current_outputs["logits"], outputs["logits"])
+
+                    carry = new_carry
+                    
+                    # 验证时的停机条件：所有样本都已停机，或达到最大步数
+                    if carry.halted.all() or ponder_step >= halt_max_steps:
+                        break
+            
+            total_ponder_steps += ponder_step
+            
+            logits = outputs['logits']
+            loss = criterion(logits, labels)
             total_loss += loss.item()
             _, predicted = torch.max(logits.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    accuracy = 100 * correct / total
-    return total_loss / len(loader), accuracy
 
+    accuracy = 100 * correct / total
+    avg_ponder_val = total_ponder_steps / len(loader)
+    print(f"Validation Avg Steps: {avg_ponder_val:.2f}/{inner_model.config.halt_max_steps}")
+    return total_loss / len(loader), accuracy
 # --- 主函数 ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Advanced Training Script for HR-ViT on CIFAR-100")
     parser.add_argument('--config', type=str, default="config_cifar100.yaml", help="Path to the config file.")
     parser.add_argument('--resume', action='store_true', help="Resume training from the best_model checkpoint.")
     parser.add_argument('--no-wandb', action='store_true', help="Disable Weights & Biases logging.")
-    parser.add_argument('--pretrained-weights', type=str, default="/root/autodl-tmp/checkpoints/checkpoint", help="Path to a pretrained model checkpoint for transfer learning.")
+    parser.add_argument('--pretrained-weights', type=str, default=None, help="Path to a pretrained model checkpoint for transfer learning.")
     args = parser.parse_args()
-
-    print("--- [诊断] 1. 程序开始，正在解析参数...")
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
-    print("--- [诊断] 2. 配置文件加载完毕。")
-
     use_wandb = not args.no_wandb
     if use_wandb:
-        print("--- [诊断] 3. 正在初始化 W&B...")
         wandb_config = config["wandb"]
         if wandb_config.get("dir"):
             os.makedirs(wandb_config["dir"], exist_ok=True)
-
         wandb.init(
             project=wandb_config["project"],
             entity=wandb_config.get("entity"),
             name=wandb_config.get("name"),
             config=config,
-            dir=wandb_config.get("dir") 
+            dir=wandb_config.get("dir")
         )
-        print("--- [诊断] 4. W&B 初始化成功。")
 
     device = torch.device(config["run"]["device"] if torch.cuda.is_available() else "cpu")
     os.makedirs(config["run"]["checkpoint_path"], exist_ok=True)
     checkpoint_file = os.path.join(config["run"]["checkpoint_path"], "best_model.pth")
 
-    print(f"--- [诊断] 5. 准备加载数据集，num_workers={config['training']['num_workers']}...")
     train_loader, val_loader = get_dataloaders(**config["training"])
-    print("--- [诊断] 6. 数据集加载成功！")
 
     model_config = config["model"]
+    # 确保 batch_size 参数传递给模型配置
     model_config["batch_size"] = config["training"]["batch_size"]
-    print("--- [诊断] 7. 正在初始化模型...")
     hr_vit_model = HRViT_V1(model_config)
     model = ACTLossHead(hr_vit_model, loss_type="softmax_cross_entropy")
     model.to(device)
-    print("--- [诊断] 8. 模型初始化完毕。")
 
     print(f"模型总参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     if args.pretrained_weights and not args.resume:
+        print(f"--- 正在加载预训练权重: {args.pretrained_weights} ---")
         load_partial_pretrained_weights(model, args.pretrained_weights, device)
 
     optimizer_config = config["training"]
-    betas = (optimizer_config.get("beta1", 0.9), optimizer_config.get("beta2", 0.999))
+    betas = (optimizer_config.get("beta1", 0.9), optimizer_config.get("beta2", 0.95))
     optimizer = optim.AdamW(
-        model.parameters(), 
-        lr=optimizer_config["learning_rate"], 
+        model.parameters(),
+        lr=optimizer_config["learning_rate"],
         weight_decay=optimizer_config["weight_decay"],
         betas=betas
     )
-    print(f"初始化 AdamW 优化器，betas={betas}")
 
     criterion = nn.CrossEntropyLoss()
     scaler = GradScaler()
@@ -288,31 +332,84 @@ if __name__ == "__main__":
     manager = CheckpointManager(patience=config["training"]["early_stopping_patience"], verbose=True, path=checkpoint_file)
 
     if args.resume and os.path.isfile(checkpoint_file):
-        print(f"加载检查点: {checkpoint_file}")
+        print(f"--- 正在从检查点恢复训练: {checkpoint_file} ---")
         checkpoint = torch.load(checkpoint_file, map_location=device)
+        # 安全加载模型权重
         model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        # 建议在改变 halt_max_steps 后不加载优化器状态，但如果配置未变，可以加载
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        manager.val_loss_min = checkpoint['best_val_loss']
-        manager.best_score = -manager.val_loss_min
+
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        manager.val_loss_min = checkpoint.get('best_val_loss', float('inf'))
+        manager.best_score = -manager.val_loss_min if manager.val_loss_min != float('inf') else None
         act_warmup_activated = checkpoint.get('act_warmup_activated', False)
         act_warmup_start_epoch = checkpoint.get('act_warmup_start_epoch', -1)
-        print(f"从 epoch {start_epoch} 继续。")
+        print(f"--- 恢复成功，将从 Epoch {start_epoch} 开始 ---")
 
-    print("--- [诊断] 9. 一切准备就绪，即将开始第一个epoch的训练！")
-    
+    # --- [核心修改] 将 epoch 变量传入 train_one_epoch ---
+    def train_one_epoch_with_epoch_logging(epoch, model, loader, optimizer, device, scaler, act_loss_weight, scheduler):
+        model.train()
+        total_loss = 0.0
+        total_ponder_steps = 0.0
+        inner_model = model.module.model if isinstance(model, nn.DataParallel) else model.model
+
+        # --- [核心修改] 在进度条描述中加入 Epoch 信息 ---
+        batch_bar = tqdm(loader, desc=f"Epoch {epoch}/{config['training']['epochs']} Training (ACT W: {act_loss_weight:.3f})")
+
+        for batch_idx, (images, labels) in enumerate(batch_bar):
+            # ... (内部循环逻辑保持不变) ...
+            images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            batch = {"images": images, "labels": labels}
+            optimizer.zero_grad(set_to_none=True)
+            loss = None
+            with autocast():
+                carry = inner_model.initial_carry(batch)
+                halt_max_steps = inner_model.config.halt_max_steps
+                ponder_step = 0
+                while True:
+                    ponder_step += 1
+                    new_carry, current_loss, _, _, halted_all = model(
+                        batch=batch, carry=carry, return_keys=[], act_loss_weight=act_loss_weight)
+                    loss = current_loss
+                    carry = new_carry
+                    if halted_all or ponder_step >= halt_max_steps:
+                        break
+            total_ponder_steps += ponder_step
+            if loss is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                # 注意：学习率调度器应该在每个 step 更新，而不是每个 epoch
+                scheduler.step()
+                total_loss += loss.item()
+                avg_ponder = total_ponder_steps / (batch_idx + 1)
+                batch_bar.set_postfix(
+                    loss=f"{loss.item():.3f}",
+                    lr=f"{scheduler.get_last_lr()[0]:.1e}",
+                    avg_steps=f"{avg_ponder:.2f}/{halt_max_steps}"
+                )
+        return total_loss / len(loader)
+
+    # --- 主训练循环 ---
     for epoch in range(start_epoch, config["training"]["epochs"] + 1):
+        # --- [核心修改] 在每个 Epoch 开始时打印日志 ---
+        print(f"\n{'='*20} Starting Epoch {epoch}/{config['training']['epochs']} {'='*20}")
+
         act_config = config["training"]["act_loss"]
         act_loss_weight = 0.0
         if act_warmup_activated:
             progress = (epoch - act_warmup_start_epoch) / act_config["warmup_epochs"]
             act_loss_weight = min(1.0, progress)
+            print(f"ACT Loss is active. Weight: {act_loss_weight:.4f}")
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, scaler, act_loss_weight, scheduler)
-        
+        # --- [核心修改] 调用新的带日志的训练函数 ---
+        train_loss = train_one_epoch_with_epoch_logging(epoch, model, train_loader, optimizer, device, scaler, act_loss_weight, scheduler)
+
         if use_wandb:
             wandb.log({
                 "epoch": epoch,
@@ -321,18 +418,20 @@ if __name__ == "__main__":
                 "act_loss_weight": act_loss_weight
             })
 
+        # --- 验证逻辑 ---
         if epoch % config["training"]["validation_interval"] == 0:
+            print(f"\n--- Running Validation for Epoch {epoch} ---")
             val_loss, val_acc = validate_one_epoch(model, val_loader, criterion, device)
-            print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-            
+            print(f"--- Epoch {epoch} Validation Result | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% ---")
+
             if use_wandb:
-                wandb.log({"val_loss": val_loss, "val_accuracy": val_acc})
-            
+                wandb.log({"val_loss": val_loss, "val_accuracy": val_acc, "epoch": epoch})
+
             if not act_warmup_activated and val_acc >= act_config["trigger_accuracy_threshold"]:
                 act_warmup_activated = True
                 act_warmup_start_epoch = epoch
-                print(f"--- 验证准确率达到 {val_acc:.2f}% (阈值 {act_config['trigger_accuracy_threshold']}%)! 开始预热 ACT Loss ---")
-            
+                print(f"--- !!! ACT Loss Triggered !!! Accuracy {val_acc:.2f}% reached threshold {act_config['trigger_accuracy_threshold']}% ---")
+
             current_state = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -345,11 +444,10 @@ if __name__ == "__main__":
             }
             manager(val_loss, current_state)
             if manager.early_stop:
-                print("早停触发！")
+                print("--- Early stopping triggered. Ending training. ---")
                 break
-    
-    print("\n训练结束。")
-    print(f"性能最优的模型保存在: {checkpoint_file}")
-    print(f"次优（前一最佳）模型保存在: {manager.previous_best_path}")
+
+    print("\nTraining finished.")
+    print(f"Best model saved to: {checkpoint_file}")
     if use_wandb:
         wandb.finish()

@@ -187,6 +187,8 @@ class HRViT_V1_Inner(nn.Module):
         return new_carry, output_logits, (q_logits[..., 0], q_logits[..., 1])
 
 
+# models/hrm/hrm_vit_v1.py (请替换 HRViT_V1.forward 方法)
+
 class HRViT_V1(nn.Module):
     """ACT wrapper."""
     def __init__(self, config_dict: dict):
@@ -194,39 +196,40 @@ class HRViT_V1(nn.Module):
         self.config = HRViT_V1Config.model_validate(config_dict)
         self.inner = HRViT_V1_Inner(self.config)
 
-    # 这是一个辅助属性，用来获取模型所在的设备
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
     def initial_carry(self, batch: Dict[str, torch.Tensor]):
         batch_size = batch["images"].shape[0]
-        # 关键修正：获取模型当前设备
         device = self.device
-
         return HRViT_V1Carry(
-            # 关键修正：将设备信息传递下去
             inner_carry=self.inner.empty_carry(batch_size, device=device),
-            # 关键修正：在创建时就指定正确的设备
             steps=torch.zeros((batch_size,), dtype=torch.int32, device=device),
             halted=torch.ones((batch_size,), dtype=torch.bool, device=device),
-            # empty_like 会自动在与 batch['images'] 等相同的设备上创建
             current_data={k: torch.empty_like(v) for k, v in batch.items()}
         )
         
-    def forward(self, carry: HRViT_V1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[HRViT_V1Carry, Dict[str, torch.Tensor]]:
-        # 关键修正：确保 carry 中的张量在进入 reset_carry 之前是正确的设备
-        # new_current_data 的创建逻辑已经可以保证这一点
-        new_inner_carry = self.inner.reset_carry(carry.halted.to(self.device), carry.inner_carry)
-        new_steps = torch.where(carry.halted, 0, carry.steps)
-        new_current_data = {k: torch.where(carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
+# models/hrm/hrm_vit_v1.py (最终修正版的 forward 方法)
 
-        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
+    def forward(self, carry: HRViT_V1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[HRViT_V1Carry, Dict[str, torch.Tensor]]:
+        # 1. 确定哪些样本是上一步停机了的，它们需要被重置
+        reset_mask = carry.halted.to(self.device)
+        
+        # 2. 准备步数：重置的样本从0开始，其余的继承。然后所有样本步数+1，进入当前思考步骤。
+        new_steps = torch.where(reset_mask, 0, carry.steps) + 1
+        
+        # 3. 准备数据和状态：重置的样本加载新数据，其余的继承
+        new_inner_carry = self.inner.reset_carry(reset_mask, carry.inner_carry)
+        new_current_data = {k: torch.where(reset_mask.view((-1,) + (1,) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
+
+        # 4. 运行一次内部模型
+        inner_new_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
 
         outputs = {"logits": logits, "q_halt_logits": q_halt_logits, "q_continue_logits": q_continue_logits}
         
+        # 5. 在不计算梯度的模式下，决定在当前步骤结束后，哪些样本应该停机
         with torch.no_grad():
-            new_steps = new_steps + 1
             is_last_step = new_steps >= self.config.halt_max_steps
             halted = is_last_step
 
@@ -234,8 +237,11 @@ class HRViT_V1(nn.Module):
                 halted = halted | (q_halt_logits > q_continue_logits)
                 min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
                 halted = halted & (new_steps >= min_halt_steps)
-                next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
+            
+            # 为强化学习计算 target Q 值
+            if self.training and (self.config.halt_max_steps > 1):
+                next_q_halt_logits, next_q_continue_logits = self.inner(inner_new_carry, new_current_data)[-1]
                 outputs["target_q_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
 
-        return HRViT_V1Carry(new_inner_carry, new_steps, halted, new_current_data), outputs
-    # ================================================================= #
+        # 6. 返回为下一步准备的、全新的 carry 状态
+        return HRViT_V1Carry(inner_new_carry, new_steps, halted, new_current_data), outputs

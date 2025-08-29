@@ -34,7 +34,7 @@ training:
   num_workers: 16      # 根据您的 CPU 核心数调整
   augmentation_type: "autoaugment"
   # --- 优化器与学习率 ---
-  epochs: 2000
+  epochs: 20000
   optimizer: "AdamW"
   learning_rate: 2.0e-5
   weight_decay: 0.05
@@ -49,7 +49,7 @@ training:
   # --- 新增：基于性能的ACT Loss调度 ---
   act_loss:
     # 当验证准确率达到此阈值时，开始引入ACT loss
-    trigger_accuracy_threshold: 2.0 # 单位是百分比
+    trigger_accuracy_threshold: 0.1 # 单位是百分比
     # 达到阈值后，用 N 个 epoch 将权重从 0 线性增长到 1.0
     warmup_epochs: 1
 # ============== 运行设置 ==============
